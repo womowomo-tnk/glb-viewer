@@ -1,0 +1,267 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>GLB Viewer (URL param: glb=...)</title>
+  <style>
+    html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Noto Sans", "Apple Color Emoji","Segoe UI Emoji"; }
+    #app { height: 100%; display: flex; flex-direction: column; }
+    header { padding: 10px 12px; border-bottom: 1px solid #e5e7eb; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    header input { flex: 1; min-width: 220px; padding: 10px; border: 1px solid #d1d5db; border-radius: 10px; }
+    header button { padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 10px; background: #fff; cursor: pointer; }
+    header button:hover { background: #f9fafb; }
+    #status { font-size: 12px; color: #6b7280; }
+    #viewer { position: relative; flex: 1; overflow: hidden; background: #0b0f1a; }
+    #overlay {
+      position: absolute; inset: 0; display: none;
+      align-items: center; justify-content: center; flex-direction: column;
+      gap: 10px; color: #e5e7eb; padding: 16px; text-align: center;
+      background: rgba(0,0,0,0.5);
+    }
+    #overlay.show { display: flex; }
+    #hint { font-size: 12px; color: #9ca3af; max-width: 720px; line-height: 1.4; }
+    a { color: #93c5fd; }
+    .pill { padding: 2px 8px; border: 1px solid #374151; border-radius: 999px; font-size: 12px; color: #cbd5e1; }
+  </style>
+
+  <!-- Import map for Three.js -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+
+<body>
+  <div id="app">
+    <header>
+      <span class="pill">glb=URL</span>
+      <input id="glbInput" type="url" placeholder="Enter a .glb URL (https://.../model.glb)" autocomplete="off" />
+      <button id="renderBtn" type="button">Render</button>
+      <span id="status"></span>
+    </header>
+
+    <div id="viewer">
+      <div id="overlay">
+        <div id="overlayTitle" style="font-weight: 700; font-size: 16px;">No GLB URL provided</div>
+        <div id="hint">
+          Add a <b>glb</b> URL parameter like:
+          <br/>
+          <code>?glb=https%3A%2F%2Fexample.com%2Fmodel.glb</code>
+          <br/><br/>
+          Or paste a URL above and click <b>Render</b>.
+          <br/><br/>
+          Note: The GLB server must allow cross-origin requests (CORS), or the browser may block loading.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+    import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+
+    const viewerEl = document.getElementById("viewer");
+    const overlayEl = document.getElementById("overlay");
+    const overlayTitleEl = document.getElementById("overlayTitle");
+    const statusEl = document.getElementById("status");
+    const glbInput = document.getElementById("glbInput");
+    const renderBtn = document.getElementById("renderBtn");
+
+    // --- URL helpers ---
+    function getGlbFromQuery() {
+      const params = new URLSearchParams(window.location.search);
+      const raw = params.get("glb");
+      return raw ? raw.trim() : "";
+    }
+
+    function navigateWithGlb(url) {
+      const u = new URL(window.location.href);
+      u.searchParams.set("glb", url);
+      // Navigate so refresh/share works.
+      window.location.href = u.toString();
+    }
+
+    function setStatus(msg) {
+      statusEl.textContent = msg || "";
+    }
+
+    function showOverlay(title) {
+      overlayTitleEl.textContent = title || "No GLB URL provided";
+      overlayEl.classList.add("show");
+    }
+
+    function hideOverlay() {
+      overlayEl.classList.remove("show");
+    }
+
+    // --- Three.js setup ---
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(viewerEl.clientWidth, viewerEl.clientHeight);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    viewerEl.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0b0f1a);
+
+    const camera = new THREE.PerspectiveCamera(
+      45,
+      viewerEl.clientWidth / viewerEl.clientHeight,
+      0.01,
+      2000
+    );
+    camera.position.set(0.8, 0.6, 1.6);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.06;
+    controls.target.set(0, 0.2, 0);
+
+    // Lights
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x223355, 0.9);
+    scene.add(hemi);
+
+    const dir = new THREE.DirectionalLight(0xffffff, 1.0);
+    dir.position.set(3, 4, 2);
+    scene.add(dir);
+
+    // Ground (subtle)
+    const groundGeo = new THREE.CircleGeometry(4, 64);
+    const groundMat = new THREE.MeshStandardMaterial({ color: 0x0f172a, metalness: 0.0, roughness: 1.0 });
+    const ground = new THREE.Mesh(groundGeo, groundMat);
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.y = -0.001;
+    scene.add(ground);
+
+    const loader = new GLTFLoader();
+    let currentRoot = null;
+
+    function disposeObject3D(obj) {
+      obj.traverse((child) => {
+        if (child.isMesh) {
+          if (child.geometry) child.geometry.dispose();
+          const mats = Array.isArray(child.material) ? child.material : [child.material];
+          mats.forEach((m) => {
+            if (!m) return;
+            // dispose textures
+            for (const k in m) {
+              const v = m[k];
+              if (v && v.isTexture) v.dispose();
+            }
+            m.dispose?.();
+          });
+        }
+      });
+    }
+
+    function frameObject(object3D) {
+      const box = new THREE.Box3().setFromObject(object3D);
+      const size = box.getSize(new THREE.Vector3());
+      const center = box.getCenter(new THREE.Vector3());
+
+      // Center the object
+      object3D.position.sub(center);
+
+      // Fit camera to object
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const fov = (camera.fov * Math.PI) / 180;
+      let cameraZ = (maxDim / 2) / Math.tan(fov / 2);
+      cameraZ *= 2.2; // padding factor
+
+      camera.position.set(cameraZ * 0.6, cameraZ * 0.4, cameraZ);
+      camera.near = Math.max(maxDim / 500, 0.01);
+      camera.far = Math.max(maxDim * 50, 100);
+      camera.updateProjectionMatrix();
+
+      controls.target.set(0, 0, 0);
+      controls.update();
+    }
+
+    function clearCurrentModel() {
+      if (currentRoot) {
+        scene.remove(currentRoot);
+        disposeObject3D(currentRoot);
+        currentRoot = null;
+      }
+    }
+
+    async function loadGlb(url) {
+      clearCurrentModel();
+      hideOverlay();
+      setStatus("Loading...");
+
+      try {
+        const gltf = await loader.loadAsync(url);
+        currentRoot = gltf.scene || gltf.scenes?.[0];
+        if (!currentRoot) throw new Error("No scene found in GLB.");
+
+        // Slightly improve PBR look
+        currentRoot.traverse((n) => {
+          if (n.isMesh && n.material) {
+            n.castShadow = false;
+            n.receiveShadow = false;
+          }
+        });
+
+        scene.add(currentRoot);
+        frameObject(currentRoot);
+        setStatus("Loaded ✅");
+      } catch (err) {
+        console.error(err);
+        clearCurrentModel();
+        setStatus("Failed ❌");
+        showOverlay("Failed to load GLB");
+        // Add a bit more helpful info in status
+        const msg = (err && err.message) ? err.message : String(err);
+        setStatus("Failed ❌ " + msg);
+      }
+    }
+
+    // Render loop
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // Resize handling
+    function onResize() {
+      const w = viewerEl.clientWidth;
+      const h = viewerEl.clientHeight;
+      renderer.setSize(w, h);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    }
+    window.addEventListener("resize", onResize);
+
+    // UI behavior
+    renderBtn.addEventListener("click", () => {
+      const url = glbInput.value.trim();
+      if (!url) return;
+      navigateWithGlb(url);
+    });
+
+    glbInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") renderBtn.click();
+    });
+
+    // Init based on query param
+    const glbUrl = getGlbFromQuery();
+    if (glbUrl) {
+      glbInput.value = glbUrl;
+      loadGlb(glbUrl);
+    } else {
+      showOverlay("No GLB URL provided");
+      setStatus("Paste a GLB URL and click Render.");
+    }
+  </script>
+</body>
+</html>
